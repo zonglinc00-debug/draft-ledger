@@ -1,0 +1,14 @@
+{
+  "name": "draft-ledger",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "build": "node scripts/build.js",
+    "start": "node scripts/build.js && node scripts/serve.js",
+    "test": "node --test",
+    "grid": "node scripts/import-grid.js"
+  }
+}

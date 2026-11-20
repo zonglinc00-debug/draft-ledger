@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' data:; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="An opponent scouting and Fearless Draft workspace.">
+  <title>Draft Ledger · Coaching workspace</title>
+  <!-- styles -->
+  <!-- modules -->
+</head>
+<body>
+  <a class="skip" href="#workspace">Skip to workspace</a>
+  <div class="shell">
+    <aside class="rail">
+      <a class="brand" href="#scout"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span><span>Draft Ledger<small>Coaching workspace</small></span></a>
+      <nav aria-label="Workspace">
+        <a href="#scout" data-view="scout"><span class="nav-icon" aria-hidden="true">⌗</span>Scouting</a>
+        <a href="#draft" data-view="draft"><span class="nav-icon" aria-hidden="true">▤</span>Draft room</a>
+        <a href="#method" data-view="method"><span class="nav-icon" aria-hidden="true">▧</span>Method &amp; data</a>
+      </nav>
+      <div class="rail-bottom">
+        <div class="eyebrow">DATA SOURCE</div>
+        <div class="source-label" id="source-label"></div>
+        <button type="button" id="import-trigger" class="button rail-button">Import local data</button>
+        <input type="file" id="data-file" accept=".json,application/json" hidden>
+        <button type="button" id="demo-trigger" class="button rail-button" hidden>Return to demo</button>
+      </div>
+    </aside>
+    <div class="main-shell">
+      <header class="topbar">
+        <span id="view-label">Scouting</span>
+        <span id="header-match"></span>
+      </header>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <main id="workspace" tabindex="-1"></main>
+      <noscript><p class="notice">Enable JavaScript to use Draft Ledger.</p></noscript>
+    </div>
+  </div>
+</body>
+</html>
