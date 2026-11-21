@@ -2,7 +2,7 @@ import { readFile, mkdir, writeFile } from 'node:fs/promises';
 
 const root = new URL('../', import.meta.url);
 const source = name => readFile(new URL(`src/${name}`, root), 'utf8');
-const modules = ['draft', 'demo', 'scout', 'forecast', 'app'];
+const modules = ['draft', 'demo', 'scout', 'coaching', 'forecast', 'app'];
 const imports = {};
 for (const name of modules) {
   const js = (await source(`${name}.js`)).replace(/from '\.\/([a-z]+)\.js'/g, "from 'ledger/$1'");

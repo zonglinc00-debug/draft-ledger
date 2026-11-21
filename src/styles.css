@@ -172,6 +172,24 @@ details[open] summary { margin-bottom: 10px; }
 .draft-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-bottom: 14px; }
 .draft-controls label { min-width: 112px; }
 
+.finding { margin-top: .65rem; color: var(--muted); }
+.timeline { list-style: none; padding: 0; margin: 1rem 0 0; }
+.timeline li { display: grid; grid-template-columns: minmax(75px, .28fr) 2fr; gap: 14px; padding: 12px 0; border-top: 1px solid var(--border); }
+.timeline li:last-child { padding-bottom: 0; }
+.timeline h3 { color: var(--cyan); }
+.timeline .pivot { color: var(--text); margin-bottom: 5px; }
+.timeline small, .timeline p + p { color: var(--muted); }
+.timeline p + p, .timeline details { margin-top: 4px; }
+.timeline details { font-size: .86rem; }
+.coach-flow { display: grid; gap: 18px; max-width: 1050px; }
+.coach-flow .hero-small { margin: 0; }
+.coach-steps { display: grid; grid-template-columns: repeat(4, 1fr); list-style: none; margin: 0; padding: 0; gap: 8px; }
+.coach-steps li { border-bottom: 2px solid var(--border); padding-bottom: 6px; font-size: .9rem; color: var(--muted); }
+.coach-steps [aria-current] { color: var(--cyan); border-color: currentColor; }
+.coach-flow h2 + p { margin-top: 6px; }
+.coach-flow .forecast-panel { max-width: 650px; }
+.coach-flow .board-sides .board-side { min-width: 0; }
+
 @media (max-width: 1210px) {
   .stage-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
   .filter-bar { grid-template-columns: repeat(3,minmax(0,1fr)); }
@@ -179,6 +197,7 @@ details[open] summary { margin-bottom: 10px; }
 }
 @media (max-width: 920px) {
   .shell { --rail-width: 170px; }
+  .hero, .dashboard { grid-template-columns: minmax(0,1fr); }
   .rail { padding-inline: 11px; }
   .brand { font-size: 1rem; gap: 7px; }
   .brand small { font-size: .73rem; }

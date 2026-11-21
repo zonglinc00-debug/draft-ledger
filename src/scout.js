@@ -116,7 +116,7 @@ export function championsFor(game, team, player = '') {
 }
 
 export function tendencies(cohort, team, player, champion) {
-  const bansKnown = cohort.filter(game => game[teamSide(game, team)].bans !== null);
+  const bansKnown = cohort.filter(hasCompleteBans);
   const picked = cohort.map(game => championsFor(game, team, player).map(pick => pick.champion));
   const banned = bansKnown.map(game => game[teamSide(game, team)].bans);
   function ranks(perGame) {
@@ -132,6 +132,12 @@ export function tendencies(cohort, team, player, champion) {
     })).sort((a, b) => b.hits - a.hits || a.id.localeCompare(b.id));
   }
   return { picks: ranks(picked), bans: ranks(banned), banGames: bansKnown.length };
+}
+
+export function hasCompleteBans(game) {
+  if (SIDES.some(side => game[side].bans?.length !== 5)) return false;
+  const banned = new Set(SIDES.flatMap(side => game[side].bans));
+  return banned.size === 10 && SIDES.every(side => game[side].picks.every(p => !banned.has(p.champion)));
 }
 
 export function fearlessStages(cohort, evidence, team, player, focus) {
@@ -152,17 +158,32 @@ export function macroSummary(cohort, team, player, focus = '') {
   const rows = cohort.filter(game => !focus || championsFor(game, team, player).some(pick => pick.champion === focus));
   const routeGames = rows.filter(game => game.macro?.routes[teamSide(game, team)]);
   const objectiveGames = rows.filter(game => game.macro?.objectivesRead);
-  const dragonGames = objectiveGames.filter(game => game.macro.objectives.some(item => item.kind === 'Drake'));
-  const sortedDrakes = game => game.macro.objectives.filter(item => item.kind === 'Drake')
-    .sort((a, b) => a.seconds - b.seconds);
   const headCount = (games, predicate) => games.filter(game => predicate(game, teamSide(game, team))).length;
+  const timing = kind => {
+    const firsts = objectiveGames.flatMap(game => {
+      const first = game.macro.objectives.filter(item => item.kind === kind).sort((a, b) => a.seconds - b.seconds)[0];
+      return first ? [{ seconds: first.seconds, taken: first.side === teamSide(game, team) }] : [];
+    });
+    const times = firsts.map(item => item.seconds).sort((a, b) => a - b);
+    const mid = Math.floor(times.length / 2);
+    return { n: times.length, taken: firsts.filter(item => item.taken).length,
+      median: times.length ? (times[mid] + times[Math.floor((times.length - 1) / 2)]) / 2 : null,
+      earliest: times[0], latest: times.at(-1) };
+  };
+  const timings = { Drake: timing('Drake'), Herald: timing('Herald') };
+  const sides = Object.fromEntries(SIDES.map(side => {
+    const games = rows.filter(game => teamSide(game, team) === side);
+    return [side, { wins: games.filter(game => game.winner === side).length, n: games.length }];
+  }));
   return {
+    timings, sides,
+    sideGap: sides.blue.n && sides.red.n ? sides.blue.wins / sides.blue.n - sides.red.wins / sides.red.n : null,
     games: rows.length,
     top: headCount(routeGames, (game, side) => game.macro.routes[side] === 'Top'),
     bottom: headCount(routeGames, (game, side) => game.macro.routes[side] === 'Bottom'),
     routeGames: routeGames.length, objectiveGames: objectiveGames.length,
-    firstDrake: headCount(dragonGames, (game, side) => sortedDrakes(game)[0].side === side),
-    dragonGames: dragonGames.length,
+    firstDrake: timings.Drake.taken,
+    dragonGames: timings.Drake.n,
     drakeEarly: headCount(objectiveGames, (game, side) => game.macro.objectives.some(item =>
       item.kind === 'Drake' && item.side === side && item.seconds <= 14 * 60)),
     grubsEarly: headCount(objectiveGames, (game, side) => game.macro.objectives.some(item =>

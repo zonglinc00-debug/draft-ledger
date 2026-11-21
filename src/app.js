@@ -1,4 +1,5 @@
 import { makeDemo } from './demo.js';
+import { followupResults, seriesTimeline, startRehearsal } from './coaching.js';
 import { ORDER, ROLES, addAction, availability, lockedBefore, newDraft, nextGame, phase, restoreDraft, setHomeSide, undoAction } from './draft.js';
 import { compareForecast, draftEstimator, preferences, trainForecast } from './forecast.js';
 import { SIDES, checkSeries, fearlessStages, macroSummary, otherSide, scoutCohort, scoutInsight, teamSide, tendencies, verifyDataset } from './scout.js';
@@ -6,7 +7,7 @@ import { SIDES, checkSeries, fearlessStages, macroSummary, otherSide, scoutCohor
 const main = document.querySelector('#workspace');
 const notice = document.querySelector('#notice');
 const fileInput = document.querySelector('#data-file');
-const views = { scout: 'Scouting', draft: 'Draft room', method: 'Method & data' };
+const views = { scout: 'Scouting', draft: 'Draft room', method: 'Method & data', coach: 'Coach rehearsal' };
 const storageKey = 'draft-ledger:demo:v1';
 const publishedDemo = makeDemo();
 const dateFormat = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeZone: 'UTC' });
@@ -19,9 +20,11 @@ const signed = value => `${value >= 0 ? '+' : '−'}${(Math.abs(value) * 100).to
 const capital = text => text[0].toUpperCase() + text.slice(1);
 
 let state;
+let workspaceState;
+let rehearsal;
 let forecastCache;
 
-function install(data) {
+function makeState(data, restore = true) {
   verifyDataset(data);
   const catalog = new Map(data.catalog.map(champ => [champ.id, champ]));
   const names = new Map(data.teams.map(team => [team.id, team]));
@@ -37,15 +40,20 @@ function install(data) {
   const team = data.source === 'demo' ? 'breakwater'
     : [...nearby].sort((a, b) => b[1] - a[1])[0]?.[0] || data.teams.find(item => item.id !== home).id;
   let draft = newDraft();
-  if (data.source === 'demo') {
+  if (restore && data.source === 'demo') {
     try { draft = restoreDraft(JSON.parse(localStorage.getItem(storageKey)), catalog); } catch {}
   }
-  state = {
+  return {
     data, catalog, names, home, team, patch: '', player: '', focus: '', recent: 0,
     evidence: checkSeries(data.games), model: trainForecast(data.games),
     draft, game: draft.games.length - 1,
     choice: '', search: '', poolRole: '', poolStatus: 'available'
   };
+}
+
+function install(data) {
+  workspaceState = makeState(data);
+  rehearsal = null;
   forecastCache = null;
 }
 
@@ -59,7 +67,7 @@ function showNotice(message) {
 }
 
 function saveDraft() {
-  if (state.data.source !== 'demo') return;
+  if (state.data.source !== 'demo' || state === rehearsal) return;
   try { localStorage.setItem(storageKey, JSON.stringify(state.draft)); } catch {}
 }
 
@@ -87,7 +95,7 @@ function percentInterval(ci) {
   return ci ? `${Math.round(100 * ci[0])}–${Math.round(100 * ci[1])}%` : 'unavailable';
 }
 
-function insightCard(insight, homeOpeners) {
+function insightCard(insight, homeOpeners, showDraftLink = true) {
   if (!insight) {
     return `<article class="panel insight span"><h2>How to win</h2>
       <p class="description">Choose a cohort with Game 1 evidence to identify an opening priority.</p></article>`;
@@ -103,7 +111,7 @@ function insightCard(insight, homeOpeners) {
   return `<article class="panel insight span">
     <div class="panel-heading">
       <div><p class="eyebrow">How to win</p><h2>${actionable ? `Test a Game 1 ban on ${name}` : `Review ${name} in the opener`}</h2></div>
-      ${actionable ? `<button type="button" class="button primary" data-action="test-insight" data-champion="${escapeHtml(champion)}">Test in draft room</button>` : ''}
+      ${actionable && showDraftLink ? `<button type="button" class="button primary" data-action="test-insight" data-champion="${escapeHtml(champion)}">Test in draft room</button>` : ''}
     </div>
     <p class="description">${opponent} picked <strong>${name}</strong> in <strong>${count} of ${n} Game 1s</strong>${n ? ` (${percent(count, n)}, 95% Wilson interval ${percentInterval(ci)})` : ''}.
       ${actionable ? 'Compare the first-ban scenario with your current board.' : 'The current sample does not meet the threshold for a ban suggestion.'}
@@ -151,7 +159,76 @@ function macroCard(macro, focus) {
         ${bar('Drake by 14:00', macro.drakeEarly, macro.objectiveGames, 'coral')}
         ${bar('Grubs by 14:00', macro.grubsEarly, macro.objectiveGames, 'coral')}
       </section>
+      <section><h3>First recorded objective</h3>
+        ${Object.entries(macro.timings).map(([kind, row]) => `<p class="finding"><strong>${kind}</strong> · ${row.n
+          ? `median ${clockTime(row.median)} (range ${clockTime(row.earliest)}–${clockTime(row.latest)}). ${row.n}/${macro.games} games timed. ${escapeHtml(teamName(state.team))} took ${row.taken}/${row.n}.`
+          : `No timed ${kind.toLowerCase()} in ${macro.games} games.`}</p>`).join('')}
+      </section>
+      <section><h3>Opponent wins by side</h3>
+        ${SIDES.map(side => bar(capital(side), macro.sides[side].wins, macro.sides[side].n)).join('')}
+        <p class="meta stage-note">${macro.sideGap === null ? 'Both sides need a result to compare win rates.' : `Blue minus red is ${signed(macro.sideGap)} in this cohort.`}</p>
+      </section>
     </div></article>`;
+}
+
+function clockTime(seconds) {
+  const rounded = Math.round(seconds);
+  return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, '0')}`;
+}
+
+function counterplan(cohort, ranks, stages, focus) {
+  const pick = ranks.picks[0], ban = ranks.bans[0];
+  const name = id => escapeHtml(champName(id));
+  const followup = focus && followupResults(cohort, state.evidence, state.team, focus);
+  const { banned, open } = followup || {};
+  return `<article class="panel span">
+    ${heading('Counter-draft plan', `${escapeHtml(teamName(state.team))} · ${cohort.length} filtered games across ${new Set(cohort.map(g => g.series)).size} series.`)}
+    <div class="dashboard">
+      <section><h3>What should we rehearse?</h3>
+        <p class="finding">${pick?.hits ? `Prepare a matchup into <strong>${name(pick.id)}</strong>. The opponent fielded it in ${pick.hits}/${pick.n} games (${percent(pick.hits, pick.n)}).` : 'No matching pick in this sample.'}</p>
+        <p class="finding">${ban?.hits ? `Prepare a second option if our plan needs <strong>${name(ban.id)}</strong>. The opponent banned it in ${ban.hits}/${ban.n} verified drafts (${percent(ban.hits, ban.n)}).` : `No matching ban across ${ranks.banGames} verified drafts.`}</p>
+        ${focus ? `<p class="finding"><strong>Game 2 after a Game 1 ban on ${name(focus)}</strong><br>
+          The opponent won ${banned.wins}/${banned.n} after the other side banned it and ${open.wins}/${open.n} when neither side banned it.
+          ${banned.n && open.n ? `Observed difference ${signed(banned.wins / banned.n - open.wins / open.n)}. ${Math.min(banned.n, open.n) < 6 ? 'Fewer than six series in one group.' : 'Opponents, sides and lineups can differ.'}` : 'The paired series sample is too sparse for a win-rate difference.'}</p>` : ''}
+      </section>
+      <section><h3>What changes in Games 3–5?</h3>
+        ${stages.slice(2).map(s => `<p class="finding"><strong>Game ${s.number}</strong> · ${s.games
+          ? `Rehearse against ${name(s.leader)}, the most frequent pick (${s.leaderHits}/${s.games}, ${percent(s.leaderHits, s.games)}). ${focus ? `${name(focus)} was already locked in ${s.games - s.eligible}/${s.games} drafts.` : ''}`
+          : 'No compatible games in scope.'}</p>`).join('')}
+      </section>
+    </div></article>`;
+}
+
+function timelineCard(cohort, fixedSeries = '') {
+  const { data, team, evidence } = state;
+  const series = [...new Set(cohort.filter(g => evidence.get(g.id).compatible).map(g => g.series))];
+  const active = fixedSeries || (series.includes(state.series) ? state.series : series[0]);
+  const rows = seriesTimeline(data.games, evidence, active, team);
+  const name = id => escapeHtml(champName(id));
+  const options = fixedSeries ? [] : series.map(id => {
+    const first = data.games.find(g => g.series === id && g.number === 1);
+    return [id, `${dateFormat.format(new Date(first.date))} · vs ${teamName(first[otherSide(teamSide(first, team))].team)} · ${id}`];
+  });
+  return `<article class="panel span">${heading('Series timeline', fixedSeries
+    ? `Recorded drafts from series ${escapeHtml(fixedSeries)}. Scores are from ${escapeHtml(teamName(team))}’s side.`
+    : 'Select a series from the filtered games to see its complete history. Scores are from the scouted team’s side.')}
+    ${!fixedSeries && options.length ? select('series-history', 'Recorded series', options, active) : ''}
+    ${rows.length ? `<ol class="timeline">${rows.map(({ game, side, wins, losses, locks, pair, previousPair, released }) => {
+      const pairNames = pair.ids.map(name).join(' + ');
+      const pairLabel = pair.lane ? 'Bottom / support' : 'Roster pair';
+      const result = side === game.winner ? 'Win' : 'Loss';
+      const taken = released?.find(p => p.takenBy === side) || released?.find(p => p.takenBy);
+      const pivot = taken ? `${name(taken.id)} goes from a ban to a pick for ${escapeHtml(teamName(game[taken.takenBy].team))}`
+        : `${previousPair ? 'Switch to' : 'Open with'} ${pairNames}`;
+      return `<li><div><h3>Game ${game.number}</h3><small>${capital(side)} · ${result}<br>Series ${wins}–${losses}</small></div>
+        <div><h3 class="pivot">${pivot}</h3><p><strong>${locks} prior picks locked</strong> · ${pairLabel}${taken ? `: ${pairNames}` : ''}</p>
+        <p class="meta">${previousPair ? `The previous pair (${previousPair.ids.map(name).join(' + ')}) is locked.` : 'Opening draft. Both teams have the full pool.'}</p>
+        ${game.number > 1 ? `<p>${released === null ? 'Ban comparison unavailable.' : released.length
+          ? `Previous opponent bans now open · ${released.map(p => name(p.id) + (p.takenBy ? ` (picked by ${escapeHtml(teamName(game[p.takenBy].team))})` : ' (unpicked)')).join(', ')}.`
+          : 'No previous opponent ban was available and unbanned by both sides.'}</p>` : ''}
+        <details><summary>Five picks</summary>${game[side].picks.map(p => name(p.champion)).join(', ')}</details></div></li>`;
+    }).join('')}</ol>` : '<p class="muted">No consecutive, repeat-free series in this cohort.</p>'}
+  </article>`;
 }
 
 function evidenceTable(cohort) {
@@ -186,7 +263,7 @@ function renderScout() {
   return `<section class="hero">
     <div><p class="eyebrow">Opponent scouting</p><h1>Prepare for ${escapeHtml(teamName(team))}</h1>
       <p>Read the opening draft, track later-series pivots, and test your answer on the board.</p></div>
-    <a class="button primary" href="#draft">Open draft room</a>
+    <div class="action-row"><a class="button primary" href="#coach">Start coach rehearsal</a><a class="button" href="#draft">Open draft room</a></div>
   </section>
   <section class="filter-bar" aria-label="Scouting filters">
     ${select('scout-home', 'Your team', teamOptions.filter(([id]) => id !== team), home)}
@@ -204,6 +281,7 @@ function renderScout() {
   </dl>
   <div class="dashboard">
     ${insightCard(insight, homeOpeners)}
+    ${counterplan(cohort, chosenTendencies, stages, focus || insight?.champion)}
     <article class="panel">${heading('Repeat picks', `${cohort.length} team-game opportunities${player ? ' with the player on the roster' : ''}.`)}
       ${rankedRows(chosenTendencies.picks) || '<p class="muted">No picks in this cohort.</p>'}
     </article>
@@ -211,6 +289,7 @@ function renderScout() {
       ${rankedRows(chosenTendencies.bans, 'coral') || '<p class="muted">No complete ban records for this cohort.</p>'}
     </article>
     ${stageCard(stages, focus || insight?.champion)}
+    ${timelineCard(cohort)}
     ${macroCard(macro, focus)}
     ${cohort.length ? evidenceTable(cohort) : ''}
   </div>`;
@@ -248,7 +327,7 @@ function estimateFor(ctx) {
   if (forecastCache?.key === key) return forecastCache;
   const weightMaps = preferences(data, { ...ctx.teams, patch, gameNumber: game + 1 });
   const compute = draftEstimator(data, model, ctx.teams, ctx.locked, weightMaps);
-  forecastCache = { key, compute, base: compute(ctx.moves) };
+  forecastCache = { key, data, compute, base: compute(ctx.moves) };
   return forecastCache;
 }
 
@@ -275,7 +354,9 @@ function forecastReadout(ctx) {
         <p class="meta">Monte Carlo standard error ${(100 * comparison.simulationNoise).toFixed(1)} pp. Scenario delta under the model.</p>`
         : `<p class="description">${selected ? 'This move is legal. The forecast needs more evidence.' : ctx.turn && ctx.active
           ? 'Select an available champion to preview a pick or ban.' : 'This board has no pending action.'}</p>`}
-      ${selected ? `<button class="button primary" type="button" data-action="apply">Confirm ${ctx.turn[1]}</button>` : ''}
+      ${selected ? (state === rehearsal
+        ? '<button class="button primary" type="button" data-action="coach-confirm">Confirm ban and review insights</button>'
+        : `<button class="button primary" type="button" data-action="apply">Confirm ${ctx.turn[1]}</button>`) : ''}
     </div>`;
 }
 
@@ -361,6 +442,7 @@ function methodPage() {
       <p>Pick rates use filtered team games. Ban rates use games with complete ban records. Champion filtering narrows rows and conditions macro on that pick. Missing telemetry reduces the denominator.</p>
       <p>Fearless comparisons use complete, consecutive series without repeat picks on either side. This is compatibility inferred from the recorded drafts. Prior picks remove champions from later eligibility denominators.</p>
       <p>The route marker describes a classified top or bottom jungle position from 2:30 to 3:40. The first-drake denominator is games with a timed drake. The 14-minute metrics use games with any recognized timed objective.</p>
+      <p>First drake and Herald timings use the earliest recorded take per game by either side. Side splits use all scoped results. The Game 2 comparison pairs consecutive games in the same series with verified Game 1 bans. Differences between those groups can reflect the teams they faced.</p>
     </article>
     <article class="panel"><h2>Probability and validation</h2>
       <p>A regularized logistic model scores blue side from team and champion coefficients. The simulator completes the legal board using recent pick and ban histories weighted by team, patch and game stage. Unseen candidates have prior weight. Draft scenarios use the same random seeds.</p>
@@ -374,8 +456,59 @@ function methodPage() {
   </div>`;
 }
 
+const steps = ['Scouting', 'Draft', 'Forecast', 'Insights'];
+
+function renderCoach() {
+  const { data, team, home, catalog, series, step, evidence } = state;
+  const cohort = scoutCohort(data.games, { team });
+  const ctx = boardContext();
+  const opener = data.games.find(game => game.series === series && game.number === 1);
+  const labels = ['Rehearse the opening draft', 'Compare this ban'];
+  const target = step === 3 ? state.draft.games[0][0].champion : state.choice;
+  let content;
+  if (step === 0) {
+    const insight = scoutInsight(cohort, evidence, team, '', '', catalog);
+    content = insightCard(insight, data.games.filter(g => g.number === 1 && teamSide(g, home)), false);
+  } else if (step === 1) {
+    content = `<article class="panel"><h2>Choose the first blue-side ban</h2>
+      <p class="description">Mirehorn is the opening recommendation. Choose a different champion to compare another plan.</p>
+      <div class="section-gap">${select('coach-choice', 'Proposed ban', [...catalog.values()].sort(sortName).map(c => [c.id, c.name]), state.choice)}</div>
+      <div class="board-sides section-gap">${SIDES.map(side => boardSide(side, ctx.moves, ctx.teams)).join('')}</div></article>`;
+  } else if (step === 2) {
+    content = `<article class="panel forecast-panel">${forecastReadout(ctx)}</article>`;
+  } else {
+    content = `<div class="dashboard">${counterplan(cohort, tendencies(cohort, team, '', ''),
+      fearlessStages(cohort, evidence, team, '', target), target)}${timelineCard(cohort, series)}</div>`;
+  }
+  const notes = [
+    'Review Breakwater’s opening pick and route across the full fictional history, including this series. Decide which ban to test.',
+    'Rehearse Game 1 as Northstar. The board starts before the first ban.',
+    'Compare the current board with the proposed ban. Both estimates use the same 120 legal completion draws.',
+    `You banned ${escapeHtml(champName(target))} in the rehearsal. Compare that decision with the historical cohort, then follow the recorded series through Game 5.`
+  ];
+  return `<div class="coach-flow"><header class="hero-small"><div><h1>Coach rehearsal</h1>
+    <p>Northstar vs Breakwater · ${dateFormat.format(new Date(opener.date))} · original five-game series</p></div>
+    <a class="button" href="#scout">Exit rehearsal</a></header>
+    <ol class="coach-steps" aria-label="Rehearsal progress">${steps.map((name, i) =>
+      `<li${i === step ? ' aria-current="step"' : ''}>${i + 1}. ${name}</li>`).join('')}</ol>
+    <section aria-labelledby="coach-heading"><h2 tabindex="-1" id="coach-heading">${steps[step]}</h2><p class="muted">${notes[step]}</p></section>
+    ${content}<div class="action-row">${step ? '<button class="button" data-action="coach-back">Previous step</button>' : ''}
+    ${step < 2 ? `<button class="button primary" data-action="coach-next">${labels[step]}</button>` : ''}
+    ${step === 3 ? '<a class="button primary" href="#scout">Finish rehearsal</a>' : ''}</div></div>`;
+}
+
 function refresh(focusId = '') {
   const view = viewName();
+  if (view === 'coach') {
+    if (!rehearsal) showNotice('');
+    rehearsal ??= Object.assign(makeState(publishedDemo, false), startRehearsal(publishedDemo));
+    state = rehearsal;
+  } else {
+    state = workspaceState;
+    rehearsal = null;
+  }
+  // A private import and the original demo may use overlapping IDs.
+  if (forecastCache && forecastCache.data !== state.data) forecastCache = null;
   document.querySelector('#view-label').textContent = views[view];
   document.querySelector('#header-match').textContent = `${teamName(state.home)} vs ${teamName(state.team)}`;
   document.querySelector('#source-label').textContent = state.data.source === 'demo' ? 'Original demo data' : 'Local GRID import';
@@ -384,7 +517,7 @@ function refresh(focusId = '') {
     if (link.dataset.view === view) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   }
-  main.innerHTML = view === 'draft' ? renderDraft() : view === 'method' ? methodPage() : renderScout();
+  main.innerHTML = view === 'coach' ? renderCoach() : view === 'draft' ? renderDraft() : view === 'method' ? methodPage() : renderScout();
   if (focusId) document.getElementById(focusId)?.focus();
 }
 
@@ -437,7 +570,7 @@ main.addEventListener('change', event => {
   const fields = {
     'scout-home': 'home', 'scout-team': 'team', 'scout-patch': 'patch', 'scout-player': 'player',
     'scout-champion': 'focus', 'scout-window': 'recent',
-    'pool-role': 'poolRole', 'pool-status': 'poolStatus'
+    'pool-role': 'poolRole', 'pool-status': 'poolStatus', 'series-history': 'series', 'coach-choice': 'choice'
   };
   if (fields[id]) {
     state[fields[id]] = id === 'scout-window' ? Number(value) : value;
@@ -456,6 +589,17 @@ main.addEventListener('click', event => {
   if (!button) return;
   const { action, champion, game } = button.dataset;
   try {
+    if (state === rehearsal && action.startsWith('coach-')) {
+      if (action === 'coach-confirm' && state.step === 2) {
+        state.draft = addAction(state.draft, state.choice, state.catalog);
+        state.step++;
+      } else if (action === 'coach-back' && state.step > 0) {
+        if (state.step === 3) state.draft = undoAction(state.draft);
+        state.step--;
+      } else if (action === 'coach-next' && state.step < 2) state.step++;
+      refresh('coach-heading');
+      return;
+    }
     if (action === 'test-insight') return testInsight(champion);
     if (action === 'preview') {
       state.choice = champion;
@@ -514,6 +658,7 @@ fileInput.addEventListener('change', async () => {
     if (data?.source !== 'grid') throw new Error('Choose the private scouting.grid.json generated by the importer.');
     install(data);
     showNotice(`Local data loaded · ${data.games.length} games. The file stays in this tab.`);
+    if (viewName() === 'coach') location.hash = 'scout';
     refresh();
   } catch (error) {
     showNotice(`Could not load local data. ${error.message}`);
