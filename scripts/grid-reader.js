@@ -52,18 +52,27 @@ function gridRole(value) {
     carry: 'Bottom', botlane: 'Bottom', support: 'Support', utility: 'Support' })[role];
 }
 
-export function compiledGames(gameRows, rosterRows, seriesRows, catalog, teamNames) {
+export function compiledGames(gameRows, rosterRows, seriesRows, catalog, teamNames, players, stages) {
   const rosters = Map.groupBy(rosterRows, row => row.game_id);
   const series = new Map(seriesRows.map(row => [row.series_id, row]));
   const games = [];
   let skipped = 0;
+  const lookupMisses = { teams: 0, players: 0, characters: 0, tournamentStages: 0 };
+  const tournaments = new Map();
+  for (const row of seriesRows) {
+    const candidates = stages?.get(JSON.stringify([row.event, row.stage])) || [];
+    const matches = candidates.filter(stage => row.scheduled_start >= stage.first_scheduled
+      && row.scheduled_start <= stage.last_scheduled);
+    if (matches.length === 1) tournaments.set(row.series_id, matches[0].tournament_id);
+    else if (stages) lookupMisses.tournamentStages++;
+  }
   for (const row of gameRows) {
     const first = gridSide(row.team1_side);
     const second = gridSide(row.team2_side);
     const seriesRow = series.get(row.series_id);
     if (!seriesRow) continue;
     const date = [row.started_at, seriesRow.scheduled_start].find(value => Number.isFinite(Date.parse(value)));
-    if (!row.game_id || !row.winner_team_id || !first || !second || first === second || !date
+    if (row.finished?.toLowerCase() === 'false' || !row.game_id || !row.winner_team_id || !first || !second || first === second || !date
       || !row.team1_id || !row.team2_id || row.team1_id === row.team2_id
       || !Number.isInteger(Number(row.game_number)) || Number(row.game_number) < 1) {
       skipped++;
@@ -72,15 +81,22 @@ export function compiledGames(gameRows, rosterRows, seriesRows, catalog, teamNam
     const winner = row.winner_team_id === row.team1_id ? first : row.winner_team_id === row.team2_id ? second : null;
     const roster = rosters.get(row.game_id) || [];
     const sideData = (id, name) => {
-      if (!teamNames.has(id)) teamNames.set(id, { id, name: name || `Team ${id}` });
+      if (!teamNames.has(id)) {
+        lookupMisses.teams++;
+        teamNames.set(id, { id, name: name || `Team ${id}` });
+      }
       const byPlayer = new Map();
       for (const player of roster) {
-        if (player.team_id !== id || !player.player_id || !player.character_id) continue;
-        if (!catalog.has(player.character_id)) catalog.set(player.character_id, {
-          id: player.character_id, name: player.character_name || `Champion ${player.character_id}`
-        });
+        if (player.team_id !== id || !player.player_id || !player.character_id
+          || player.participation_status === 'inactive' || (player.series_id && player.series_id !== row.series_id)) continue;
+        if (!catalog.has(player.character_id)) {
+          lookupMisses.characters++;
+          catalog.set(player.character_id, { id: player.character_id, name: player.character_name || `Champion ${player.character_id}` });
+        }
+        const known = players?.get(player.player_id);
+        if (players && !known) lookupMisses.players++;
         byPlayer.set(player.player_id, { champion: player.character_id, player: player.player_id,
-          playerName: player.player_name || `Player ${player.player_id}`, role: gridRole(player.role || player.position) });
+          playerName: player.player_name || known?.name || `Player ${player.player_id}`, role: gridRole(player.role || player.position) });
       }
       return { team: id, picks: [...byPlayer.values()], bans: null };
     };
@@ -92,9 +108,10 @@ export function compiledGames(gameRows, rosterRows, seriesRows, catalog, teamNam
       continue;
     }
     games.push({ id: row.game_id, series: row.series_id, number: Number(row.game_number),
-      date, patch: row.patch || 'Unknown', winner, ...sides });
+      date, patch: row.patch || 'Unknown', event: seriesRow.event, stage: seriesRow.stage,
+      tournamentId: tournaments.get(row.series_id), winner, ...sides });
   }
-  return { games, skipped };
+  return { games, skipped, lookupMisses };
 }
 
 function secondsOf(snapshot) {
@@ -104,7 +121,7 @@ function secondsOf(snapshot) {
 }
 
 function objectiveType(event) {
-  if (event.action !== 'completed' || event.actor?.type !== 'player') return null;
+  if (!['completed', '!completed'].includes(event.action) || event.actor?.type !== 'player') return null;
   const action = String(event.target?.type ?? event.type?.split('-').at(-1)).toLowerCase();
   if (!action.startsWith('slay')) return null;
   if (/dragon|drake/.test(action)) return 'Drake';
@@ -129,33 +146,36 @@ function positionMarker(position) {
 }
 
 export function feedCollector(games, catalog) {
-  const slots = new Map(games.map(game => [game.id, {
+  const stats = { envelopes: 0, events: 0, sequenceGaps: 0, missingSequenceNumbers: 0,
+    unmappedBans: 0, untimedOrUnmappedObjectives: 0 };
+  let previousSequence;
+  const newSlot = game => ({
     game, bans: { blue: new Set(), red: new Set() }, snapshotBans: null,
     players: new Map(SIDES.flatMap(side => game[side].picks.map(pick => [pick.player, { side, pick }]))),
-    objectives: new Map(), routes: new Map(), jungle: new Set(), roles: new Map(), lastBucket: -1
-  }]));
+    objectives: [], routes: new Map(), jungle: new Set(), roles: new Map()
+  });
+  const slots = new Map(games.map(game => [game.id, newSlot(game)]));
 
   function collectPosition(slot, snapshot, time) {
-    if (time === null || time < 150 || time > 220) return;
-    const bucket = Math.floor(time / 10);
-    if (slot.lastBucket === bucket || !Array.isArray(snapshot.teams)) return;
-    slot.lastBucket = bucket;
-    for (const team of snapshot.teams) {
+    const inWindow = time !== null && time >= 150 && time <= 220;
+    for (const team of snapshot.teams || []) {
       if (!Array.isArray(team.players)) continue;
       for (const player of team.players) {
         const id = stringId(player.id);
         const info = slot.players.get(id);
         if (!info) continue;
-        const role = gridRole(player.role ?? player.position?.role);
+        const role = gridRole(player.role ?? player.position?.role) ||
+          (Array.isArray(player.roles) && player.roles.map(role => gridRole(role?.name ?? role)).find(Boolean));
         if (role) slot.roles.set(id, role);
-        if (jungleRole(player) || info.pick.role === 'Jungle') {
+        if (role === 'Jungle' || jungleRole(player) || info.pick.role === 'Jungle') {
           slot.roles.set(id, 'Jungle');
           slot.jungle.add(id);
         }
-        const region = positionMarker(player.position);
+        const region = inWindow && positionMarker(player.position);
         if (region) {
-          const marks = slot.routes.get(id) || [];
-          marks.push(region);
+          const marks = slot.routes.get(id) || new Map();
+          const bucket = Math.floor(time / 10);
+          if (!marks.has(bucket)) marks.set(bucket, region);
           slot.routes.set(id, marks);
         }
       }
@@ -163,40 +183,76 @@ export function feedCollector(games, catalog) {
   }
 
   function collectBans(slot, snapshot) {
-    if (!Array.isArray(snapshot.draftActions) || snapshot.draftActions.length < 10) return;
+    if (!Array.isArray(snapshot.draftActions)) return;
     const draftBans = { blue: new Set(), red: new Set() };
     for (const action of snapshot.draftActions) {
       const keyword = String(action.type ?? action.action ?? action.actionType ?? '').toLowerCase();
       if (!['ban', 'banned', 'team-banned-character'].includes(keyword)) continue;
-      const team = stringId(action.team?.id ?? action.teamId ?? action.actor?.id);
+      const team = stringId(action.drafter?.id ?? action.team?.id ?? action.teamId ?? action.actor?.id);
       const side = SIDES.find(key => slot.game[key].team === team);
-      const champion = stringId(action.character?.id ?? action.characterId ?? action.target?.id);
+      const champion = stringId(action.draftable?.id ?? action.character?.id ?? action.characterId ?? action.target?.id);
       if (side && catalog.has(champion)) draftBans[side].add(champion);
     }
-    if (SIDES.every(side => draftBans[side].size === 5)) slot.snapshotBans = draftBans;
+    slot.snapshotBans = draftBans;
   }
 
-  function ingest(envelope) {
+  function ingest(envelope, expectedSeries) {
     if (!Array.isArray(envelope.events)) throw new Error('Expected one events array per GRID envelope.');
+    if (expectedSeries && stringId(envelope.seriesId) !== expectedSeries) throw new Error('Unexpected series ID.');
+    const sequence = envelope.sequenceNumber;
+    if (expectedSeries || sequence !== undefined) {
+      if (!Number.isSafeInteger(sequence) || sequence <= previousSequence) throw new Error('Invalid envelope sequence.');
+      if (previousSequence !== undefined && sequence > previousSequence + 1) {
+        stats.sequenceGaps++;
+        stats.missingSequenceNumbers += sequence - previousSequence - 1;
+      }
+      previousSequence = sequence;
+    }
+    stats.envelopes++;
+    stats.events += envelope.events.length;
     for (const event of envelope.events) {
-      const snapshots = event.seriesState?.games ?? event.seriesStateDelta?.games;
-      if (!Array.isArray(snapshots) || !snapshots.length) continue;
-      const snapshot = snapshots.at(-1);
-      const slot = slots.get(stringId(snapshot.id));
-      if (!slot) continue;
+      const snapshots = event.seriesState?.games || [];
+      const deltas = event.seriesStateDelta?.games || [];
+      if (event.includesFullState) {
+        for (const game of snapshots) {
+          const entry = slots.get(stringId(game.id));
+          if (entry) collectBans(entry, game);
+        }
+      }
+      const id = stringId(event.target?.type === 'game' ? event.target.id : event.actor?.type === 'game' ? event.actor.id :
+        deltas.length === 1 ? deltas[0].id : snapshots.length === 1 ? snapshots[0].id : '');
+      const slot = slots.get(id);
+      const snapshot = snapshots.find(game => stringId(game.id) === id) ?? deltas.find(game => stringId(game.id) === id);
+      const isBan = ['team-banned-character', 'team-!banned-character'].includes(event.type);
+      const kind = objectiveType(event);
+      if (!slot || !snapshot) {
+        if (kind) stats.untimedOrUnmappedObjectives++;
+        if (isBan) stats.unmappedBans++;
+        continue;
+      }
+      if (event.type === 'series-!started-game') {
+        slots.set(id, newSlot(slot.game));
+        continue;
+      }
       const time = secondsOf(snapshot);
       const team = event.actor?.type === 'team' ? stringId(event.actor.id) : '';
       const actorSide = SIDES.find(side => slot.game[side].team === team);
       const target = stringId(event.target?.id);
+      if (isBan && !event.includesFullState) slot.snapshotBans = null;
       if (actorSide && catalog.has(target)) {
         if (event.type === 'team-banned-character') slot.bans[actorSide].add(target);
         if (event.type === 'team-!banned-character') slot.bans[actorSide].delete(target);
-      }
-      if (snapshot.draftActions?.length && !slot.snapshotBans) collectBans(slot, snapshot);
-      const kind = objectiveType(event);
-      const side = slot.players.get(stringId(event.actor?.id))?.side;
-      if (kind && side && time !== null) {
-        slot.objectives.set(`${kind}:${side}:${Math.floor(time)}`, { kind, side, seconds: time });
+      } else if (isBan) stats.unmappedBans++;
+      if (kind) {
+        const actor = stringId(event.actor?.id);
+        const side = slot.players.get(actor)?.side;
+        const type = event.target?.type;
+        if (!side || time === null) stats.untimedOrUnmappedObjectives++;
+        else if (event.action === '!completed') {
+          const last = slot.objectives.findLastIndex(item => item.actor === actor && item.type === type);
+          if (last >= 0) slot.objectives.splice(last, 1);
+          else stats.untimedOrUnmappedObjectives++;
+        } else slot.objectives.push({ kind, side, seconds: time, type, actor });
       }
       collectPosition(slot, snapshot, time);
     }
@@ -209,29 +265,37 @@ export function feedCollector(games, catalog) {
       const banned = slot.snapshotBans || slot.bans;
       const allBans = SIDES.flatMap(side => [...banned[side]]);
       const picks = SIDES.flatMap(side => game[side].picks.map(pick => pick.champion));
-      if (allBans.length === 10 && new Set(allBans).size === 10 && !allBans.some(id => picks.includes(id))) {
+      if (SIDES.every(side => banned[side].size === 5) && new Set(allBans).size === 10 && !allBans.some(id => picks.includes(id))) {
         for (const side of SIDES) game[side].bans = [...banned[side]];
       }
       const routes = { blue: null, red: null };
       for (const side of SIDES) {
         const ids = [...slot.jungle].filter(id => players.get(id).side === side);
         if (ids.length !== 1) continue;
-        const marks = slot.routes.get(ids[0]) || [];
+        const marks = [...(slot.routes.get(ids[0])?.values() || [])];
         if (marks.length < 3) continue;
         const top = marks.filter(region => region === 'Top').length;
         if (top / marks.length >= 0.7) routes[side] = 'Top';
         if ((marks.length - top) / marks.length >= 0.7) routes[side] = 'Bottom';
       }
-      const objectives = [...slot.objectives.values()].sort((a, b) => a.seconds - b.seconds);
+      // The elemental and generic drake events can describe the same take.
+      const drakes = new Set();
+      const objectives = slot.objectives.filter(item => {
+        if (item.kind !== 'Drake') return true;
+        const key = JSON.stringify([item.side, item.seconds]);
+        if (drakes.has(key)) return false;
+        drakes.add(key);
+        return true;
+      }).map(({ kind, side, seconds }) => ({ kind, side, seconds })).sort((a, b) => a.seconds - b.seconds);
       if (objectives.length || routes.blue || routes.red) {
         game.macro = { routes, objectives, objectivesRead: objectives.length > 0 };
       }
     }
   }
-  return { ingest, finish };
+  return { ingest, finish, stats };
 }
 
-export async function readZstdFeed(file, collect) {
+export async function readZstdFeed(file, collect, expectedSeries) {
   const stream = createZstdDecompress();
   const decompression = pipeline(createReadStream(file), stream);
   const lines = createInterface({ input: stream, crlfDelay: Infinity });
@@ -240,7 +304,7 @@ export async function readZstdFeed(file, collect) {
   try {
     for await (const line of lines) {
       if (!line.trim()) continue;
-      collect.ingest(JSON.parse(line));
+      collect.ingest(JSON.parse(line), expectedSeries);
       envelopes++;
     }
     await decompression;
